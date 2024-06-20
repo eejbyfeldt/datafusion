@@ -18,152 +18,20 @@
 //! Defines physical expressions which specify ordering requirement
 //! that can evaluated at runtime during query execution
 
-use std::any::Any;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, VecDeque};
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use crate::aggregate::utils::{down_cast_any_ref, ordering_fields};
-use crate::expressions::format_state_name;
-use crate::{
-    reverse_order_bys, AggregateExpr, LexOrdering, PhysicalExpr, PhysicalSortExpr,
-};
-
-use arrow::datatypes::{DataType, Field};
+use arrow::datatypes::DataType;
 use arrow_array::cast::AsArray;
 use arrow_array::{new_empty_array, Array, ArrayRef, StructArray};
 use arrow_schema::{Fields, SortOptions};
 use datafusion_common::utils::{array_into_list_array, compare_rows, get_row_at_idx};
 use datafusion_common::{exec_err, Result, ScalarValue};
-use datafusion_expr::utils::AggregateOrderSensitivity;
 use datafusion_expr::Accumulator;
-
-/// Expression for a `ARRAY_AGG(... ORDER BY ..., ...)` aggregation. In a multi
-/// partition setting, partial aggregations are computed for every partition,
-/// and then their results are merged.
-#[derive(Debug)]
-pub struct OrderSensitiveArrayAgg {
-    /// Column name
-    name: String,
-    /// The `DataType` for the input expression
-    input_data_type: DataType,
-    /// The input expression
-    expr: Arc<dyn PhysicalExpr>,
-    /// If the input expression can have `NULL`s
-    nullable: bool,
-    /// Ordering data types
-    order_by_data_types: Vec<DataType>,
-    /// Ordering requirement
-    ordering_req: LexOrdering,
-    /// Whether the aggregation is running in reverse
-    reverse: bool,
-}
-
-impl OrderSensitiveArrayAgg {
-    /// Create a new `OrderSensitiveArrayAgg` aggregate function
-    pub fn new(
-        expr: Arc<dyn PhysicalExpr>,
-        name: impl Into<String>,
-        input_data_type: DataType,
-        nullable: bool,
-        order_by_data_types: Vec<DataType>,
-        ordering_req: LexOrdering,
-    ) -> Self {
-        Self {
-            name: name.into(),
-            input_data_type,
-            expr,
-            nullable,
-            order_by_data_types,
-            ordering_req,
-            reverse: false,
-        }
-    }
-}
-
-impl AggregateExpr for OrderSensitiveArrayAgg {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn field(&self) -> Result<Field> {
-        Ok(Field::new_list(
-            &self.name,
-            // This should be the same as return type of AggregateFunction::ArrayAgg
-            Field::new("item", self.input_data_type.clone(), true),
-            self.nullable,
-        ))
-    }
-
-    fn create_accumulator(&self) -> Result<Box<dyn Accumulator>> {
-        OrderSensitiveArrayAggAccumulator::try_new(
-            &self.input_data_type,
-            &self.order_by_data_types,
-            self.ordering_req.clone(),
-            self.reverse,
-        )
-        .map(|acc| Box::new(acc) as _)
-    }
-
-    fn state_fields(&self) -> Result<Vec<Field>> {
-        let mut fields = vec![Field::new_list(
-            format_state_name(&self.name, "array_agg"),
-            Field::new("item", self.input_data_type.clone(), true),
-            self.nullable, // This should be the same as field()
-        )];
-        let orderings = ordering_fields(&self.ordering_req, &self.order_by_data_types);
-        fields.push(Field::new_list(
-            format_state_name(&self.name, "array_agg_orderings"),
-            Field::new("item", DataType::Struct(Fields::from(orderings)), true),
-            self.nullable,
-        ));
-        Ok(fields)
-    }
-
-    fn expressions(&self) -> Vec<Arc<dyn PhysicalExpr>> {
-        vec![self.expr.clone()]
-    }
-
-    fn order_bys(&self) -> Option<&[PhysicalSortExpr]> {
-        (!self.ordering_req.is_empty()).then_some(&self.ordering_req)
-    }
-
-    fn order_sensitivity(&self) -> AggregateOrderSensitivity {
-        AggregateOrderSensitivity::HardRequirement
-    }
-
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn reverse_expr(&self) -> Option<Arc<dyn AggregateExpr>> {
-        Some(Arc::new(Self {
-            name: self.name.to_string(),
-            input_data_type: self.input_data_type.clone(),
-            expr: self.expr.clone(),
-            nullable: self.nullable,
-            order_by_data_types: self.order_by_data_types.clone(),
-            // Reverse requirement:
-            ordering_req: reverse_order_bys(&self.ordering_req),
-            reverse: !self.reverse,
-        }))
-    }
-}
-
-impl PartialEq<dyn Any> for OrderSensitiveArrayAgg {
-    fn eq(&self, other: &dyn Any) -> bool {
-        down_cast_any_ref(other)
-            .downcast_ref::<Self>()
-            .map(|x| {
-                self.name == x.name
-                    && self.input_data_type == x.input_data_type
-                    && self.order_by_data_types == x.order_by_data_types
-                    && self.expr.eq(&x.expr)
-            })
-            .unwrap_or(false)
-    }
-}
+use datafusion_physical_expr_common::aggregate::utils::ordering_fields;
+use datafusion_physical_expr_common::sort_expr::{LexOrdering, PhysicalSortExpr};
 
 #[derive(Debug)]
 pub(crate) struct OrderSensitiveArrayAggAccumulator {
@@ -544,12 +412,12 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Arc;
 
-    use crate::aggregate::array_agg_ordered::merge_ordered_arrays;
-
     use arrow_array::{Array, ArrayRef, Int64Array};
     use arrow_schema::SortOptions;
     use datafusion_common::utils::get_row_at_idx;
     use datafusion_common::{Result, ScalarValue};
+
+    use crate::array_agg_ordered::merge_ordered_arrays;
 
     #[test]
     fn test_merge_asc() -> Result<()> {

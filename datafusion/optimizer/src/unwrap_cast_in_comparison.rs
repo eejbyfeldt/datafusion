@@ -94,6 +94,10 @@ impl OptimizerRule for UnwrapCastInComparison {
         true
     }
 
+    fn optimize_subqueries(&self) -> bool {
+        true
+    }
+
     fn rewrite(
         &self,
         plan: LogicalPlan,

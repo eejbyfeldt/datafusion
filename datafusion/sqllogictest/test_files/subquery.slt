@@ -391,7 +391,7 @@ logical_plan
 01)Filter: EXISTS (<subquery>)
 02)--Subquery:
 03)----Projection: t1.t1_int
-04)------Filter: t1.t1_id > t1.t1_int
+04)------Filter: t1.t1_int < t1.t1_id
 05)--------TableScan: t1
 06)--TableScan: t1 projection=[t1_id, t1_name, t1_int]
 

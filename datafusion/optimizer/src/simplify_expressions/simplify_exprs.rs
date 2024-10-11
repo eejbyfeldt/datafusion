@@ -57,6 +57,10 @@ impl OptimizerRule for SimplifyExpressions {
         Some(ApplyOrder::BottomUp)
     }
 
+    fn optimize_subqueries(&self) -> bool {
+        true
+    }
+
     fn supports_rewrite(&self) -> bool {
         true
     }

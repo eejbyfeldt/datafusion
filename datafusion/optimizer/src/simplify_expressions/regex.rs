@@ -42,7 +42,7 @@ pub fn simplify_regex_expr(
 ) -> Result<Expr> {
     let mode = OperatorMode::new(&op);
 
-    if let Expr::Literal(ScalarValue::Utf8(Some(pattern))) = right.as_ref() {
+    if let Some(pattern) = extract_string_literal(right.as_ref()) {
         match regex_syntax::Parser::new().parse(pattern) {
             Ok(hir) => {
                 let kind = hir.kind();
@@ -68,6 +68,20 @@ pub fn simplify_regex_expr(
 
     // Leave untouched if optimization didn't work
     Ok(Expr::BinaryExpr(BinaryExpr { left, op, right }))
+}
+
+fn extract_string_literal(expr: &Expr) -> Option<&String> {
+    fn extract_from_scalar(value: &ScalarValue) -> Option<&String> {
+        match value {
+            ScalarValue::Utf8(Some(s)) => Some(s),
+            ScalarValue::Dictionary(_, value) => extract_from_scalar(value),
+            _ => None,
+        }
+    }
+    match expr {
+        Expr::Literal(value) => extract_from_scalar(value),
+        _ => None,
+    }
 }
 
 #[derive(Debug)]

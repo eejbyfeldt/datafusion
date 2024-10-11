@@ -101,6 +101,11 @@ pub trait OptimizerRule: Debug {
         None
     }
 
+    /// Should the rule be applied to subqueries.
+    fn optimize_subqueries(&self) -> bool {
+        false
+    }
+
     /// Does this rule support rewriting owned plans (rather than by reference)?
     fn supports_rewrite(&self) -> bool {
         true
@@ -244,17 +249,13 @@ impl Optimizer {
     pub fn new() -> Self {
         let rules: Vec<Arc<dyn OptimizerRule + Sync + Send>> = vec![
             Arc::new(EliminateNestedUnion::new()),
-            Arc::new(SimplifyExpressions::new()),
             Arc::new(UnwrapCastInComparison::new()),
+            Arc::new(SimplifyExpressions::new()),
             Arc::new(ReplaceDistinctWithAggregate::new()),
             Arc::new(EliminateJoin::new()),
             Arc::new(DecorrelatePredicateSubquery::new()),
             Arc::new(ScalarSubqueryToJoin::new()),
             Arc::new(ExtractEquijoinPredicate::new()),
-            // simplify expressions does not simplify expressions in subqueries, so we
-            // run it again after running the optimizations that potentially converted
-            // subqueries to joins
-            Arc::new(SimplifyExpressions::new()),
             Arc::new(RewriteDisjunctivePredicate::new()),
             Arc::new(EliminateDuplicatedExpr::new()),
             Arc::new(EliminateFilter::new()),
@@ -272,8 +273,8 @@ impl Optimizer {
             Arc::new(SingleDistinctToGroupBy::new()),
             // The previous optimizations added expressions and projections,
             // that might benefit from the following rules
-            Arc::new(SimplifyExpressions::new()),
             Arc::new(UnwrapCastInComparison::new()),
+            Arc::new(SimplifyExpressions::new()),
             Arc::new(CommonSubexprEliminate::new()),
             Arc::new(EliminateGroupByConstant::new()),
             Arc::new(OptimizeProjections::new()),
@@ -382,23 +383,36 @@ impl Optimizer {
                     .skip_failed_rules
                     .then(|| new_plan.clone());
 
-                let starting_schema = Arc::clone(new_plan.schema());
+                let apply_rule = |plan: LogicalPlan| {
+                    let starting_schema = Arc::clone(plan.schema());
+                    match rule.apply_order() {
+                        // optimizer handles recursion
+                        Some(apply_order) => plan.rewrite(&mut Rewriter::new(
+                            apply_order,
+                            rule.as_ref(),
+                            config,
+                        )),
+                        // rule handles recursion itself
+                        None => optimize_plan_node(plan, rule.as_ref(), config),
+                    }
+                    // verify the rule didn't change the schema
+                    .and_then(|tnr| {
+                        assert_schema_is_the_same(
+                            rule.name(),
+                            &starting_schema,
+                            &tnr.data,
+                        )?;
+                        Ok(tnr)
+                    })
+                };
 
-                let result = match rule.apply_order() {
-                    // optimizer handles recursion
-                    Some(apply_order) => new_plan.rewrite(&mut Rewriter::new(
-                        apply_order,
-                        rule.as_ref(),
-                        config,
-                    )),
-                    // rule handles recursion itself
-                    None => optimize_plan_node(new_plan, rule.as_ref(), config),
-                }
-                // verify the rule didn't change the schema
-                .and_then(|tnr| {
-                    assert_schema_is_the_same(rule.name(), &starting_schema, &tnr.data)?;
-                    Ok(tnr)
-                });
+                let result = if rule.optimize_subqueries() {
+                    apply_rule(new_plan).and_then(|transformed| {
+                        transformed.transform_data(|plan| plan.map_subqueries(apply_rule))
+                    })
+                } else {
+                    apply_rule(new_plan)
+                };
 
                 // Handle results
                 match (result, prev_plan) {
